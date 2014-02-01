@@ -2,6 +2,8 @@
 # directories
 .deps
 autom4te.cache
+nbproject
+uml
 
 *.o
 
