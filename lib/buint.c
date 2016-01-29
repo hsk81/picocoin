@@ -6,9 +6,9 @@
 
 #include <string.h>
 #include <openssl/bn.h>
-#include <glib.h>
 #include <ccoin/buint.h>
 #include <ccoin/hexcode.h>
+#include <ccoin/endian.h>
 
 void bu256_bn(BIGNUM *vo, const bu256_t *vi)
 {
@@ -19,7 +19,7 @@ void bu256_bn(BIGNUM *vo, const bu256_t *vi)
 
 	unsigned int i;
 	for (i = 0; i < 8; i++) {
-		BN_set_word(&tmp, GUINT32_FROM_LE(vi->dword[i]));
+		BN_set_word(&tmp, le32toh(vi->dword[i]));
 		BN_lshift(&tmp, &tmp, (i * 32));
 
 		BN_add(vo, vo, &tmp);
@@ -53,7 +53,7 @@ void bu256_hex(char *hexstr, const bu256_t *v)
 	for (i = 7; i >= 0; i--) {		/* endian: high to low */
 		char tmp[8 + 1];
 
-		sprintf(tmp, "%08x", GUINT32_FROM_LE(v->dword[i]));
+		sprintf(tmp, "%08x", le32toh(v->dword[i]));
 		strcat(hexstr, tmp);
 	}
 }
@@ -62,14 +62,14 @@ void bu256_swap(bu256_t *v)
 {
 	unsigned int i;
 	for (i = 0; i < 8; i++)
-		v->dword[i] = GUINT32_SWAP_LE_BE(v->dword[i]);
+		v->dword[i] = bswap_32(v->dword[i]);
 }
 
 void bu256_copy_swap(bu256_t *vo, const bu256_t *vi)
 {
 	unsigned int i;
 	for (i = 0; i < 8; i++)
-		vo->dword[i] = GUINT32_SWAP_LE_BE(vi->dword[i]);
+		vo->dword[i] = bswap_32(vi->dword[i]);
 }
 
 void bu256_copy_swap_dwords(bu256_t *vo, const bu256_t *vi)
@@ -92,47 +92,29 @@ void bu256_swap_dwords(bu256_t *v)
 	memcpy(v, &tmpv, sizeof(*v));
 }
 
-guint g_bu256_hash(gconstpointer key_)
+unsigned long bu256_hash(const void *key_)
 {
 	const bu256_t *key = key_;
+	unsigned long l = 0;
 
-	return key->dword[4]; /* return random int in the middle of 32b hash */
+	memcpy(&l, &key->dword[4], sizeof(l));
+	return l;
 }
 
-gboolean g_bu256_equal(gconstpointer a_, gconstpointer b_)
-{
-	const bu256_t *a = a_;
-	const bu256_t *b = b_;
-
-	return bu256_equal(a, b) ? TRUE : FALSE;
-}
-
-guint g_bu160_hash(gconstpointer key_)
+unsigned long bu160_hash(const void *key_)
 {
 	const bu160_t *key = key_;
 
 	return key->dword[BU160_WORDS / 2]; /* return rand int in the middle */
 }
 
-gboolean g_bu160_equal(gconstpointer a_, gconstpointer b_)
+void bu256_free(void *bu256_v)
 {
-	const bu160_t *a = a_;
-	const bu160_t *b = b_;
-
-	return bu160_equal(a, b) ? TRUE : FALSE;
-}
-
-void bu256_free(bu256_t *v)
-{
+	bu256_t *v = bu256_v;
 	if (!v)
 		return;
 
 	memset(v, 0, sizeof(*v));
 	free(v);
-}
-
-void g_bu256_free(gpointer data)
-{
-	bu256_free(data);
 }
 

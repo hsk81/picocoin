@@ -6,8 +6,17 @@
  */
 
 #include <stdbool.h>
-#include <glib.h>
 #include <openssl/bn.h>
+#include <ccoin/parr.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct bp_txout;
+struct bp_keyset;
+struct bp_tx;
+struct bp_block;
 
 extern bool bp_txout_match(const struct bp_txout *txout,
 		    const struct bp_keyset *ks);
@@ -23,9 +32,13 @@ struct bp_block_match {
 
 extern void bbm_init(struct bp_block_match *match);
 extern struct bp_block_match *bbm_new(void);
-extern void bbm_free(struct bp_block_match *match);
+extern void bbm_free(void *bp_block_match_match);
 
-extern GPtrArray *bp_block_match(const struct bp_block *block,
-			  const struct bp_keyset *ks);
+extern parr *bp_block_match(const struct bp_block *block,
+			    const struct bp_keyset *ks);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __LIBCCOIN_ADDR_MATCH_H__ */

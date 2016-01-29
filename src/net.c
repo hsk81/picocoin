@@ -24,8 +24,8 @@
 #include <fcntl.h>
 #include <assert.h>
 #include <signal.h>
+#include <time.h>
 #include <errno.h>
-#include <glib.h>
 #include <event2/event.h>
 #include <ccoin/util.h>
 #include <ccoin/mbr.h>
@@ -60,7 +60,7 @@ struct net_child_info {
 	struct peer_manager	*peers;
 	struct blkdb		*db;
 
-	GPtrArray		*conns;
+	parr		*conns;
 	struct event_base	*eb;
 };
 
@@ -78,7 +78,7 @@ struct nc_conn {
 	struct net_child_info	*nci;
 
 	struct event		*write_ev;
-	GList			*write_q;	/* of struct buffer */
+	clist			*write_q;	/* of struct buffer */
 	unsigned int		write_partial;
 
 	struct p2p_message	msg;
@@ -151,16 +151,16 @@ static enum netcmds readcmd(int fd, int timeout_secs)
 	return v;
 }
 
-static void nc_conn_build_iov(GList *write_q, unsigned int partial,
+static void nc_conn_build_iov(clist *write_q, unsigned int partial,
 			      struct iovec **iov_, unsigned int *iov_len_)
 {
 	*iov_ = NULL;
 	*iov_len_ = 0;
 
-	unsigned int i, iov_len = g_list_length(write_q);
+	unsigned int i, iov_len = clist_length(write_q);
 	struct iovec *iov = calloc(iov_len, sizeof(struct iovec));
 
-	GList *tmp = write_q;
+	clist *tmp = write_q;
 
 	i = 0;
 	while (tmp) {
@@ -185,7 +185,7 @@ static void nc_conn_build_iov(GList *write_q, unsigned int partial,
 static void nc_conn_written(struct nc_conn *conn, size_t bytes)
 {
 	while (bytes > 0) {
-		GList *tmp;
+		clist *tmp;
 		struct buffer *buf;
 		unsigned int left;
 
@@ -198,7 +198,7 @@ static void nc_conn_written(struct nc_conn *conn, size_t bytes)
 			free(buf->p);
 			free(buf);
 			conn->write_partial = 0;
-			conn->write_q = g_list_delete_link(tmp, tmp);
+			conn->write_q = clist_delete(tmp, tmp);
 
 			bytes -= left;
 		}
@@ -250,7 +250,7 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 			 const void *data, size_t data_len)
 {
 	/* build wire message */
-	GString *msg = message_str(chain->netmagic, command, data, data_len);
+	cstring *msg = message_str(chain->netmagic, command, data, data_len);
 	if (!msg)
 		return false;
 
@@ -259,11 +259,11 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 	buf->p = msg->str;
 	buf->len = msg->len;
 
-	g_string_free(msg, FALSE);
+	cstr_free(msg, false);
 
 	/* if write q exists, write_evt will handle output */
 	if (conn->write_q) {
-		conn->write_q = g_list_append(conn->write_q, buf);
+		conn->write_q = clist_append(conn->write_q, buf);
 		return true;
 	}
 
@@ -277,7 +277,7 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 			return false;
 		}
 
-		conn->write_q = g_list_append(conn->write_q, buf);
+		conn->write_q = clist_append(conn->write_q, buf);
 		goto out_wrstart;
 	}
 
@@ -289,7 +289,7 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 	}
 
 	/* message partially sent; pause read; poll for writable */
-	conn->write_q = g_list_append(conn->write_q, buf);
+	conn->write_q = clist_append(conn->write_q, buf);
 	conn->write_partial = wrc;
 
 out_wrstart:
@@ -362,11 +362,11 @@ static bool nc_msg_addr(struct nc_conn *conn)
 	if (debugging) {
 		unsigned int old = 0;
 		for (i = 0; i < ma.addrs->len; i++) {
-			struct bp_address *addr = g_ptr_array_index(ma.addrs, i);
+			struct bp_address *addr = parr_idx(ma.addrs, i);
 			if (addr->nTime < cutoff)
 				old++;
 		}
-		fprintf(stderr, "net: %s addr(%u addresses, %u old)\n",
+		fprintf(stderr, "net: %s addr(%zu addresses, %u old)\n",
 			conn->addr_str, ma.addrs->len, old);
 	}
 
@@ -376,7 +376,7 @@ static bool nc_msg_addr(struct nc_conn *conn)
 
 	/* feed addresses to peer manager */
 	for (i = 0; i < ma.addrs->len; i++) {
-		struct bp_address *addr = g_ptr_array_index(ma.addrs, i);
+		struct bp_address *addr = parr_idx(ma.addrs, i);
 		if (addr->nTime > cutoff)
 			peerman_add_addr(conn->nci->peers, addr, false);
 	}
@@ -467,7 +467,7 @@ static bool nc_conn_ip_active(struct net_child_info *nci,
 	for (i = 0; i < nci->conns->len; i++) {
 		struct nc_conn *conn;
 
-		conn = g_ptr_array_index(nci->conns, i);
+		conn = parr_idx(nci->conns, i);
 		if (!memcmp(conn->peer.addr.ip, ip, 16))
 			return true;
 	}
@@ -486,7 +486,7 @@ static bool nc_conn_group_active(struct net_child_info *nci,
 	for (i = 0; i < nci->conns->len; i++) {
 		struct nc_conn *conn;
 
-		conn = g_ptr_array_index(nci->conns, i);
+		conn = parr_idx(nci->conns, i);
 		if ((group_len == conn->peer.group_len) &&
 		    !memcmp(peer->group, conn->peer.group, group_len))
 			return true;
@@ -525,7 +525,7 @@ static void nc_conn_free(struct nc_conn *conn)
 		return;
 
 	if (conn->write_q) {
-		GList *tmp = conn->write_q;
+		clist *tmp = conn->write_q;
 
 		while (tmp) {
 			struct buffer *buf;
@@ -537,7 +537,7 @@ static void nc_conn_free(struct nc_conn *conn)
 			free(buf);
 		}
 
-		g_list_free(conn->write_q);
+		clist_free(conn->write_q);
 	}
 
 	if (conn->ev) {
@@ -702,7 +702,7 @@ err_out:
 	nc_conn_kill(conn);
 }
 
-static GString *nc_version_build(struct nc_conn *conn)
+static cstring *nc_version_build(struct nc_conn *conn)
 {
 	struct msg_version mv;
 
@@ -716,7 +716,7 @@ static GString *nc_version_build(struct nc_conn *conn)
 		conn->nci->db->best_chain ?
 			conn->nci->db->best_chain->height : 0;
 
-	GString *rs = ser_msg_version(&mv);
+	cstring *rs = ser_msg_version(&mv);
 
 	msg_version_free(&mv);
 
@@ -818,9 +818,9 @@ static void nc_conn_evt_connected(int fd, short events, void *priv)
 	conn->ev = NULL;
 
 	/* build and send "version" message */
-	GString *msg_data = nc_version_build(conn);
+	cstring *msg_data = nc_version_build(conn);
 	bool rc = nc_conn_send(conn, "version", msg_data->str, msg_data->len);
-	g_string_free(msg_data, TRUE);
+	cstr_free(msg_data, true);
 
 	if (!rc) {
 		fprintf(stderr, "net: %s !conn_send\n", conn->addr_str);
@@ -845,29 +845,29 @@ err_out:
 
 static void nc_conns_gc(struct net_child_info *nci)
 {
-	GList *dead = NULL;
+	clist *dead = NULL;
 	unsigned int n_gc = 0;
 
 	/* build list of dead connections */
 	unsigned int i;
 	for (i = 0; i < nci->conns->len; i++) {
-		struct nc_conn *conn = g_ptr_array_index(nci->conns, i);
+		struct nc_conn *conn = parr_idx(nci->conns, i);
 		if (conn->dead)
-			dead = g_list_prepend(dead, conn);
+			dead = clist_prepend(dead, conn);
 	}
 
 	/* remove and free dead connections */
-	GList *tmp = dead;
+	clist *tmp = dead;
 	while (tmp) {
 		struct nc_conn *conn = tmp->data;
 		tmp = tmp->next;
 
-		g_ptr_array_remove(nci->conns, conn);
+		parr_remove(nci->conns, conn);
 		nc_conn_free(conn);
 		n_gc++;
 	}
 
-	g_list_free(dead);
+	clist_free(dead);
 
 	if (debugging)
 		fprintf(stderr, "net: gc'd %u connections\n", n_gc);
@@ -876,11 +876,11 @@ static void nc_conns_gc(struct net_child_info *nci)
 static void nc_conns_open(struct net_child_info *nci)
 {
 	if (debugging)
-		fprintf(stderr, "net: open connections (have %u, want %u more)\n",
+		fprintf(stderr, "net: open connections (have %zu, want %zu more)\n",
 			nci->conns->len,
 			NC_MAX_CONN - nci->conns->len);
 
-	while ((g_hash_table_size(nci->peers->map_addr) > 0) &&
+	while ((bp_hashtab_size(nci->peers->map_addr) > 0) &&
 	       (nci->conns->len < NC_MAX_CONN)) {
 
 		/* delete peer from front of address list.  it will be
@@ -935,7 +935,7 @@ static void nc_conns_open(struct net_child_info *nci)
 		}
 
 		/* add to our list of active connections */
-		g_ptr_array_add(nci->conns, conn);
+		parr_add(nci->conns, conn);
 
 		continue;
 
@@ -999,9 +999,9 @@ static void network_child(int read_fd, int write_fd)
 	peerman_sort(peers);
 
 	if (debugging)
-		fprintf(stderr, "net: have %u/%u peers\n",
-			g_hash_table_size(peers->map_addr),
-			g_list_length(peers->addrlist));
+		fprintf(stderr, "net: have %u/%zu peers\n",
+			bp_hashtab_size(peers->map_addr),
+			clist_length(peers->addrlist));
 
 	/*
 	 * read block database
@@ -1040,7 +1040,7 @@ static void network_child(int read_fd, int write_fd)
 	 * set up libevent dispatch
 	 */
 	struct net_child_info nci = { read_fd, write_fd, peers, &db };
-	nci.conns = g_ptr_array_sized_new(NC_MAX_CONN);
+	nci.conns = parr_new(NC_MAX_CONN, NULL);
 
 	struct event *pipe_evt;
 

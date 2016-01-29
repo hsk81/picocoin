@@ -10,7 +10,7 @@
 
 static bool sign1(const bu160_t *key_id, struct bp_keystore *ks,
 		  const bu256_t *hash, int nHashType,
-		  GString *scriptSig)
+		  cstring *scriptSig)
 {
 	struct bp_key key;
 	bool rc = false;
@@ -18,7 +18,7 @@ static bool sign1(const bu160_t *key_id, struct bp_keystore *ks,
 	bp_key_init(&key);
 
 	/* find private key in keystore */
-	if (!bkeys_privkey_get(ks, key_id, &key))
+	if (!bkeys_key_get(ks, key_id, &key))
 		goto out;
 
 	void *sig = NULL;
@@ -45,14 +45,14 @@ out:
 	return rc;
 }
 
-bool bp_script_sign(struct bp_keystore *ks, const GString *fromPubKey,
+bool bp_script_sign(struct bp_keystore *ks, const cstring *fromPubKey,
 		    const struct bp_tx *txTo, unsigned int nIn,
 		    int nHashType)
 {
 	if (!txTo || !txTo->vin || nIn >= txTo->vin->len)
 		return false;
 
-	struct bp_txin *txin = g_ptr_array_index(txTo->vin, nIn);
+	struct bp_txin *txin = parr_idx(txTo->vin, nIn);
 
 	/* get signature hash */
 	bu256_t hash;
@@ -65,7 +65,7 @@ bool bp_script_sign(struct bp_keystore *ks, const GString *fromPubKey,
 	if (!bsp_addr_parse(&addrs, fromPubKey->str, fromPubKey->len))
 		return false;
 
-	GString *scriptSig = g_string_sized_new(64);
+	cstring *scriptSig = cstr_new_sz(64);
 	bool rc = false;
 	bu160_t key_id;
 	struct buffer *kbuf;
@@ -99,14 +99,14 @@ bool bp_script_sign(struct bp_keystore *ks, const GString *fromPubKey,
 	}
 
 	if (txin->scriptSig)
-		g_string_free(txin->scriptSig, TRUE);
+		cstr_free(txin->scriptSig, true);
 	txin->scriptSig = scriptSig;
 	scriptSig = NULL;
 	rc = true;
 
 out:
 	if (scriptSig)
-		g_string_free(scriptSig, TRUE);
+		cstr_free(scriptSig, true);
 	bsp_addr_free(&addrs);
 	return rc;
 }
@@ -119,11 +119,11 @@ bool bp_sign_sig(struct bp_keystore *ks, const struct bp_utxo *txFrom,
 	    !txTo || !txTo->vin || nIn >= txTo->vin->len)
 		return false;
 
-	struct bp_txin *txin = g_ptr_array_index(txTo->vin, nIn);
+	struct bp_txin *txin = parr_idx(txTo->vin, nIn);
 
 	if (txin->prevout.n >= txFrom->vout->len)
 		return false;
-	struct bp_txout *txout = g_ptr_array_index(txFrom->vout,
+	struct bp_txout *txout = parr_idx(txFrom->vout,
 						   txin->prevout.n);
 
 	return bp_script_sign(ks, txout->scriptPubKey, txTo, nIn, nHashType);

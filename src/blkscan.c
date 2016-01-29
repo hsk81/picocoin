@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <argp.h>
-#include <glib.h>
 #include <openssl/ripemd.h>
 #include <ccoin/coredefs.h>
 #include <ccoin/base58.h>
@@ -22,6 +21,7 @@
 #include <ccoin/script.h>
 #include <ccoin/addr_match.h>
 #include <ccoin/message.h>
+#include <ccoin/hashtab.h>
 
 const char *argp_program_version = PACKAGE_VERSION;
 
@@ -30,6 +30,9 @@ static struct argp_option options[] = {
 	  "Load bitcoin addresses from text FILE.  Default filename \"blocks.dat\"." },
 	{ "blocks", 'b', "FILE", 0,
 	  "Load blockchain data from mkbootstrap-produced FILE.  Default filename \"addresses.txt\"." },
+
+	{ "no-decimal", 'N', NULL, 0,
+	  "Print values as integers (satoshis), not decimal numbers" },
 
 	{ "quiet", 'q', NULL, 0,
 	  "Silence informational messages" },
@@ -43,9 +46,10 @@ static const char doc[] =
 static char *blocks_fn = "blocks.dat";
 static char *address_fn = "addresses.txt";
 static bool opt_quiet = false;
+static bool opt_decimal = true;
 
 static struct bp_keyset bpks;
-static GHashTable *tx_idx = NULL;
+static struct bp_hashtab *tx_idx = NULL;
 
 static error_t parse_opt (int key, char *arg, struct argp_state *state);
 
@@ -61,6 +65,9 @@ static error_t parse_opt (int key, char *arg, struct argp_state *state)
 	case 'b':
 		blocks_fn = arg;
 		break;
+	case 'N':
+		opt_decimal = false;
+		break;
 	case 'q':
 		opt_quiet = true;
 		break;
@@ -75,7 +82,7 @@ static error_t parse_opt (int key, char *arg, struct argp_state *state)
 static void load_address(unsigned int line_no, const char *line)
 {
 	unsigned char addrtype;
-	GString *s = base58_decode_check(&addrtype, line);
+	cstring *s = base58_decode_check(&addrtype, line);
 
 	if (!s || addrtype != PUBKEY_ADDRESS) {
 		fprintf(stderr, "Invalid address on line %d: %s\n", line_no, line);
@@ -89,9 +96,9 @@ static void load_address(unsigned int line_no, const char *line)
 	}
 
 	struct buffer *buf_pkhash = buffer_copy(s->str,RIPEMD160_DIGEST_LENGTH);
-	g_hash_table_replace(bpks.pubhash, buf_pkhash, buf_pkhash);
+	bp_hashtab_put(bpks.pubhash, buf_pkhash, buf_pkhash);
 
-	g_string_free(s, TRUE);
+	cstr_free(s, true);
 }
 
 static void load_addresses(void)
@@ -124,7 +131,7 @@ static void load_addresses(void)
 
 	if (!opt_quiet)
 		fprintf(stderr, "%d addresses loaded\n",
-			g_hash_table_size(bpks.pubhash));
+			bp_hashtab_size(bpks.pubhash));
 }
 
 /* file pos -> block lookup */
@@ -177,7 +184,7 @@ static bool tx_from_block(struct bp_tx *dest, bu256_t *tx_hash,
 	for (n = 0; n < block->vtx->len; n++) {
 		struct bp_tx *tx;
 
-		tx = g_ptr_array_index(block->vtx, n);
+		tx = parr_idx(block->vtx, n);
 
 		bp_tx_calc_sha256(tx);
 
@@ -216,7 +223,11 @@ static int block_fd = -1;
 static void print_txout(bool show_from, unsigned int i, struct bp_txout *txout)
 {
 	char valstr[VALSTR_SZ];
-	btc_decimal(valstr, VALSTR_SZ, txout->nValue);
+	if (opt_decimal)
+		btc_decimal(valstr, VALSTR_SZ, txout->nValue);
+	else
+		snprintf(valstr, sizeof(valstr), "%lld",
+			 (long long) txout->nValue);
 
 	printf("\t%s %u: %s",
 		show_from ? "\tFrom" : "Output",
@@ -233,7 +244,7 @@ static void print_txout(bool show_from, unsigned int i, struct bp_txout *txout)
 		printf(" SOME-PUBKEYS!");
 
 	struct const_buffer *buf;
-	GList *tmp = addrs.pubhash;
+	clist *tmp = addrs.pubhash;
 	bool is_mine;
 	while (tmp) {
 		buf = tmp->data;
@@ -241,7 +252,7 @@ static void print_txout(bool show_from, unsigned int i, struct bp_txout *txout)
 
 		is_mine = bpks_lookup(&bpks, buf->p, buf->len, true);
 
-		GString *addr = base58_encode_check(PUBKEY_ADDRESS, true,
+		cstring *addr = base58_encode_check(PUBKEY_ADDRESS, true,
 						    buf->p, buf->len);
 		if (!addr) {
 			printf(" ENCODE-FAILED!\n");
@@ -253,14 +264,14 @@ static void print_txout(bool show_from, unsigned int i, struct bp_txout *txout)
 		       addr->str,
 		       is_mine ? "*" : "");
 
-		g_string_free(addr, TRUE);
+		cstr_free(addr, true);
 	}
 
 	printf("\n");
 
 out:
-        g_list_free_full(addrs.pub, g_buffer_free);
-        g_list_free_full(addrs.pubhash, g_buffer_free);
+        clist_free_ext(addrs.pub, buffer_free);
+        clist_free_ext(addrs.pubhash, buffer_free);
 }
 
 static void print_txouts(struct bp_tx *tx, int idx)
@@ -269,7 +280,7 @@ static void print_txouts(struct bp_tx *tx, int idx)
 	for (i = 0; i < tx->vout->len; i++) {
 		struct bp_txout *txout;
 
-		txout = g_ptr_array_index(tx->vout, i);
+		txout = parr_idx(tx->vout, i);
 
 		if (idx < 0)
 			print_txout(false, i, txout);
@@ -287,7 +298,7 @@ static void print_txin(unsigned int i, struct bp_txin *txin)
 	printf("\tInput %u: %s %u\n",
 		i, hexstr, txin->prevout.n);
 
-	uint64_t *fpos_p = g_hash_table_lookup(tx_idx, &txin->prevout.hash);
+	uint64_t *fpos_p = bp_hashtab_get(tx_idx, &txin->prevout.hash);
 	if (!fpos_p) {
 		printf("\t\tINPUT NOT FOUND!\n");
 		return;
@@ -313,7 +324,7 @@ static void print_txins(struct bp_tx *tx)
 	for (i = 0; i < tx->vin->len; i++) {
 		struct bp_txin *txin;
 
-		txin = g_ptr_array_index(tx->vin, i);
+		txin = parr_idx(tx->vin, i);
 
 		print_txin(i, txin);
 	}
@@ -329,12 +340,12 @@ static void index_block(unsigned int height, struct bp_block *block,
 	for (n = 0; n < block->vtx->len; n++) {
 		struct bp_tx *tx;
 
-		tx = g_ptr_array_index(block->vtx, n);
+		tx = parr_idx(block->vtx, n);
 
 		bp_tx_calc_sha256(tx);
 
 		bu256_t *hash = bu256_new(&tx->sha256);
-		g_hash_table_replace(tx_idx, hash, fpos_copy);
+		bp_hashtab_put(tx_idx, hash, fpos_copy);
 	}
 }
 
@@ -346,7 +357,7 @@ static void scan_block(unsigned int height, struct bp_block *block)
 	for (n = 0; n < block->vtx->len; n++) {
 		struct bp_tx *tx;
 
-		tx = g_ptr_array_index(block->vtx, n);
+		tx = parr_idx(block->vtx, n);
 
 		if (bp_tx_match(tx, &bpks)) {
 			char hashstr[BU256_STRSZ];
@@ -410,7 +421,7 @@ static void scan_blocks(void)
 
 		if ((height % 10000 == 0) && (!opt_quiet))
 			fprintf(stderr, "Scanned %u transactions at height %u\n",
-				(unsigned int) g_hash_table_size(tx_idx),
+				bp_hashtab_size(tx_idx),
 				height);
 	}
 
@@ -442,8 +453,8 @@ int main (int argc, char *argv[])
 
 	bpks_init(&bpks);
 
-	tx_idx = g_hash_table_new_full(g_bu256_hash, g_bu256_equal,
-				       g_bu256_free, NULL);
+	tx_idx = bp_hashtab_new_ext(bu256_hash, bu256_equal_,
+				    (bp_freefunc) bu256_free, NULL);
 
 	load_addresses();
 	scan_blocks();

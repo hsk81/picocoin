@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
+#include <signal.h>
 #include <assert.h>
 #include <openssl/rand.h>
 #include <event2/event.h>
@@ -24,10 +25,12 @@
 #include <ccoin/mbr.h>
 #include <ccoin/script.h>
 #include <ccoin/net.h>
+#include <ccoin/hashtab.h>
+#include <ccoin/hexcode.h>
 #include "peerman.h"
 #include "brd.h"
 
-GHashTable *settings;
+struct bp_hashtab *settings;
 const struct chain_info *chain = NULL;
 bu256_t chain_genesis;
 uint64_t instance_nonce;
@@ -35,7 +38,7 @@ bool debugging = false;
 FILE *plog = NULL;
 
 static struct blkdb db;
-static GHashTable *orphans;
+static struct bp_hashtab *orphans;
 static struct bp_utxo_set uset;
 static int blocks_fd = -1;
 static bool script_verf = false;
@@ -59,7 +62,7 @@ struct net_child_info {
 
 	struct peer_manager	*peers;
 
-	GPtrArray		*conns;
+	parr		*conns;
 	struct event_base	*eb;
 
 	time_t			last_getblocks;
@@ -79,7 +82,7 @@ struct nc_conn {
 	struct net_child_info	*nci;
 
 	struct event		*write_ev;
-	GList			*write_q;	/* of struct buffer */
+	clist			*write_q;	/* of struct buffer */
 	unsigned int		write_partial;
 
 	struct p2p_message	msg;
@@ -107,16 +110,20 @@ static bool nc_conn_read_disable(struct nc_conn *conn);
 static bool nc_conn_write_enable(struct nc_conn *conn);
 static bool nc_conn_write_disable(struct nc_conn *conn);
 
-static void nc_conn_build_iov(GList *write_q, unsigned int partial,
+static bool process_block(const struct bp_block *block, int64_t fpos);
+static bool have_orphan(const bu256_t *v);
+static bool add_orphan(const bu256_t *hash_in, struct const_buffer *buf_in);
+
+static void nc_conn_build_iov(clist *write_q, unsigned int partial,
 			      struct iovec **iov_, unsigned int *iov_len_)
 {
 	*iov_ = NULL;
 	*iov_len_ = 0;
 
-	unsigned int i, iov_len = g_list_length(write_q);
+	unsigned int i, iov_len = clist_length(write_q);
 	struct iovec *iov = calloc(iov_len, sizeof(struct iovec));
 
-	GList *tmp = write_q;
+	clist *tmp = write_q;
 
 	i = 0;
 	while (tmp) {
@@ -141,7 +148,7 @@ static void nc_conn_build_iov(GList *write_q, unsigned int partial,
 static void nc_conn_written(struct nc_conn *conn, size_t bytes)
 {
 	while (bytes > 0) {
-		GList *tmp;
+		clist *tmp;
 		struct buffer *buf;
 		unsigned int left;
 
@@ -154,7 +161,7 @@ static void nc_conn_written(struct nc_conn *conn, size_t bytes)
 			free(buf->p);
 			free(buf);
 			conn->write_partial = 0;
-			conn->write_q = g_list_delete_link(tmp, tmp);
+			conn->write_q = clist_delete(tmp, tmp);
 
 			bytes -= left;
 		}
@@ -206,7 +213,7 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 			 const void *data, size_t data_len)
 {
 	/* build wire message */
-	GString *msg = message_str(chain->netmagic, command, data, data_len);
+	cstring *msg = message_str(chain->netmagic, command, data, data_len);
 	if (!msg)
 		return false;
 
@@ -215,11 +222,11 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 	buf->p = msg->str;
 	buf->len = msg->len;
 
-	g_string_free(msg, FALSE);
+	cstr_free(msg, false);
 
 	/* if write q exists, write_evt will handle output */
 	if (conn->write_q) {
-		conn->write_q = g_list_append(conn->write_q, buf);
+		conn->write_q = clist_append(conn->write_q, buf);
 		return true;
 	}
 
@@ -233,7 +240,7 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 			return false;
 		}
 
-		conn->write_q = g_list_append(conn->write_q, buf);
+		conn->write_q = clist_append(conn->write_q, buf);
 		goto out_wrstart;
 	}
 
@@ -245,7 +252,7 @@ static bool nc_conn_send(struct nc_conn *conn, const char *command,
 	}
 
 	/* message partially sent; pause read; poll for writable */
-	conn->write_q = g_list_append(conn->write_q, buf);
+	conn->write_q = clist_append(conn->write_q, buf);
 	conn->write_partial = wrc;
 
 out_wrstart:
@@ -318,11 +325,11 @@ static bool nc_msg_addr(struct nc_conn *conn)
 	if (debugging) {
 		unsigned int old = 0;
 		for (i = 0; i < ma.addrs->len; i++) {
-			struct bp_address *addr = g_ptr_array_index(ma.addrs, i);
+			struct bp_address *addr = parr_idx(ma.addrs, i);
 			if (addr->nTime < cutoff)
 				old++;
 		}
-		fprintf(plog, "net: %s addr(%u addresses, %u old)\n",
+		fprintf(plog, "net: %s addr(%zu addresses, %u old)\n",
 			conn->addr_str, ma.addrs->len, old);
 	}
 
@@ -332,7 +339,7 @@ static bool nc_msg_addr(struct nc_conn *conn)
 
 	/* feed addresses to peer manager */
 	for (i = 0; i < ma.addrs->len; i++) {
-		struct bp_address *addr = g_ptr_array_index(ma.addrs, i);
+		struct bp_address *addr = parr_idx(ma.addrs, i);
 		if (addr->nTime > cutoff)
 			peerman_add_addr(conn->nci->peers, addr, false);
 	}
@@ -379,11 +386,11 @@ static bool nc_msg_verack(struct nc_conn *conn)
 		struct msg_getblocks gb;
 		msg_getblocks_init(&gb);
 		blkdb_locator(&db, NULL, &gb.locator);
-		GString *s = ser_msg_getblocks(&gb);
+		cstring *s = ser_msg_getblocks(&gb);
 
 		rc = nc_conn_send(conn, "getblocks", s->str, s->len);
 
-		g_string_free(s, TRUE);
+		cstr_free(s, true);
 		msg_getblocks_free(&gb);
 
 		conn->nci->last_getblocks = now;
@@ -405,7 +412,7 @@ static bool nc_msg_inv(struct nc_conn *conn)
 		goto out;
 
 	if (debugging && mv.invs && mv.invs->len == 1) {
-		struct bp_inv *inv = g_ptr_array_index(mv.invs, 0);
+		struct bp_inv *inv = parr_idx(mv.invs, 0);
 		char hexstr[BU256_STRSZ];
 		bu256_hex(hexstr, &inv->hash);
 
@@ -420,7 +427,7 @@ static bool nc_msg_inv(struct nc_conn *conn)
 			conn->addr_str, typestr, hexstr);
 	}
 	else if (debugging && mv.invs) {
-		fprintf(plog, "net: %s inv (%u sz)\n",
+		fprintf(plog, "net: %s inv (%zu sz)\n",
 			conn->addr_str, mv.invs->len);
 	}
 
@@ -430,11 +437,11 @@ static bool nc_msg_inv(struct nc_conn *conn)
 	/* scan incoming inv's for interesting material */
 	unsigned int i;
 	for (i = 0; i < mv.invs->len; i++) {
-		struct bp_inv *inv = g_ptr_array_index(mv.invs, i);
+		struct bp_inv *inv = parr_idx(mv.invs, i);
 		switch (inv->type) {
 		case MSG_BLOCK:
 			if (!blkdb_lookup(&db, &inv->hash) &&
-			    !g_hash_table_lookup(orphans, &inv->hash))
+			    !have_orphan(&inv->hash))
 				msg_vinv_push(&mv_out, MSG_BLOCK, &inv->hash);
 			break;
 
@@ -446,11 +453,11 @@ static bool nc_msg_inv(struct nc_conn *conn)
 
 	/* send getdata, if they have anything we want */
 	if (mv_out.invs && mv_out.invs->len) {
-		GString *s = ser_msg_vinv(&mv_out);
+		cstring *s = ser_msg_vinv(&mv_out);
 
 		rc = nc_conn_send(conn, "getdata", s->str, s->len);
 
-		g_string_free(s, TRUE);
+		cstr_free(s, true);
 	}
 
 out_ok:
@@ -473,22 +480,56 @@ static bool nc_msg_block(struct nc_conn *conn)
 	if (!deser_bp_block(&block, &buf))
 		goto out;
 	bp_block_calc_sha256(&block);
+	char hexstr[BU256_STRSZ];
+	bu256_hex(hexstr, &block.sha256);
 
 	if (debugging) {
-		char hexstr[BU256_STRSZ];
-		bu256_hex(hexstr, &block.sha256);
-
 		fprintf(plog, "net: %s block %s\n",
 			conn->addr_str,
 			hexstr);
 	}
 
+	if (!bp_block_valid(&block)) {
+		fprintf(plog, "net: %s invalid block %s\n",
+			conn->addr_str,
+			hexstr);
+		goto out;
+	}
+
 	/* check for duplicate block */
 	if (blkdb_lookup(&db, &block.sha256) ||
-	    g_hash_table_lookup(orphans, &block.sha256))
+	    have_orphan(&block.sha256))
 		goto out_ok;
 
-	// TODO: we haven't seen this block before...
+	struct iovec iov[2];
+	iov[0].iov_base = &conn->msg.hdr;	// TODO: endian bug?
+	iov[0].iov_len = sizeof(conn->msg.hdr);
+	iov[1].iov_base = (void *) buf.p;	// cast away 'const'
+	iov[1].iov_len = buf.len;
+	size_t total_write = iov[0].iov_len + iov[1].iov_len;
+
+	/* store current file position */
+	off64_t fpos64 = lseek64(blocks_fd, 0, SEEK_CUR);
+	if (fpos64 == (off64_t)-1) {
+		fprintf(plog, "blocks: lseek64 failed %s\n",
+			strerror(errno));
+		goto out;
+	}
+
+	/* write new block to disk */
+	errno = 0;
+	ssize_t bwritten = writev(blocks_fd, iov, ARRAY_SIZE(iov));
+	if (bwritten != total_write) {
+		fprintf(plog, "blocks: write failed %s\n",
+			strerror(errno));
+		goto out;
+	}
+
+	/* process block */
+	if (!process_block(&block, fpos64)) {
+		fprintf(plog, "blocks: process-block failed\n");
+		goto out;
+	}
 
 out_ok:
 	rc = true;
@@ -559,7 +600,7 @@ static bool nc_conn_ip_active(struct net_child_info *nci,
 	for (i = 0; i < nci->conns->len; i++) {
 		struct nc_conn *conn;
 
-		conn = g_ptr_array_index(nci->conns, i);
+		conn = parr_idx(nci->conns, i);
 		if (!memcmp(conn->peer.addr.ip, ip, 16))
 			return true;
 	}
@@ -578,7 +619,7 @@ static bool nc_conn_group_active(struct net_child_info *nci,
 	for (i = 0; i < nci->conns->len; i++) {
 		struct nc_conn *conn;
 
-		conn = g_ptr_array_index(nci->conns, i);
+		conn = parr_idx(nci->conns, i);
 		if ((group_len == conn->peer.group_len) &&
 		    !memcmp(peer->group, conn->peer.group, group_len))
 			return true;
@@ -617,7 +658,7 @@ static void nc_conn_free(struct nc_conn *conn)
 		return;
 
 	if (conn->write_q) {
-		GList *tmp = conn->write_q;
+		clist *tmp = conn->write_q;
 
 		while (tmp) {
 			struct buffer *buf;
@@ -629,7 +670,7 @@ static void nc_conn_free(struct nc_conn *conn)
 			free(buf);
 		}
 
-		g_list_free(conn->write_q);
+		clist_free(conn->write_q);
 	}
 
 	if (conn->ev) {
@@ -794,7 +835,7 @@ err_out:
 	nc_conn_kill(conn);
 }
 
-static GString *nc_version_build(struct nc_conn *conn)
+static cstring *nc_version_build(struct nc_conn *conn)
 {
 	struct msg_version mv;
 
@@ -807,7 +848,7 @@ static GString *nc_version_build(struct nc_conn *conn)
 	sprintf(mv.strSubVer, "/brd:%s/", VERSION);
 	mv.nStartingHeight = db.best_chain ? db.best_chain->height : 0;
 
-	GString *rs = ser_msg_version(&mv);
+	cstring *rs = ser_msg_version(&mv);
 
 	msg_version_free(&mv);
 
@@ -909,9 +950,9 @@ static void nc_conn_evt_connected(int fd, short events, void *priv)
 	conn->ev = NULL;
 
 	/* build and send "version" message */
-	GString *msg_data = nc_version_build(conn);
+	cstring *msg_data = nc_version_build(conn);
 	bool rc = nc_conn_send(conn, "version", msg_data->str, msg_data->len);
-	g_string_free(msg_data, TRUE);
+	cstr_free(msg_data, true);
 
 	if (!rc) {
 		fprintf(plog, "net: %s !conn_send\n", conn->addr_str);
@@ -936,29 +977,29 @@ err_out:
 
 static void nc_conns_gc(struct net_child_info *nci, bool free_all)
 {
-	GList *dead = NULL;
+	clist *dead = NULL;
 	unsigned int n_gc = 0;
 
 	/* build list of dead connections */
 	unsigned int i;
 	for (i = 0; i < nci->conns->len; i++) {
-		struct nc_conn *conn = g_ptr_array_index(nci->conns, i);
+		struct nc_conn *conn = parr_idx(nci->conns, i);
 		if (free_all || conn->dead)
-			dead = g_list_prepend(dead, conn);
+			dead = clist_prepend(dead, conn);
 	}
 
 	/* remove and free dead connections */
-	GList *tmp = dead;
+	clist *tmp = dead;
 	while (tmp) {
 		struct nc_conn *conn = tmp->data;
 		tmp = tmp->next;
 
-		g_ptr_array_remove(nci->conns, conn);
+		parr_remove(nci->conns, conn);
 		nc_conn_free(conn);
 		n_gc++;
 	}
 
-	g_list_free(dead);
+	clist_free(dead);
 
 	if (debugging)
 		fprintf(plog, "net: gc'd %u connections\n", n_gc);
@@ -967,11 +1008,11 @@ static void nc_conns_gc(struct net_child_info *nci, bool free_all)
 static void nc_conns_open(struct net_child_info *nci)
 {
 	if (debugging)
-		fprintf(plog, "net: open connections (have %u, want %u more)\n",
+		fprintf(plog, "net: open connections (have %zu, want %zu more)\n",
 			nci->conns->len,
 			NC_MAX_CONN - nci->conns->len);
 
-	while ((g_hash_table_size(nci->peers->map_addr) > 0) &&
+	while ((bp_hashtab_size(nci->peers->map_addr) > 0) &&
 	       (nci->conns->len < NC_MAX_CONN)) {
 
 		/* delete peer from front of address list.  it will be
@@ -1026,7 +1067,7 @@ static void nc_conns_open(struct net_child_info *nci)
 		}
 
 		/* add to our list of active connections */
-		g_ptr_array_add(nci->conns, conn);
+		parr_add(nci->conns, conn);
 
 		continue;
 
@@ -1087,7 +1128,7 @@ static bool read_config_file(const char *cfg_fn)
 		if (!parse_kvstr(line, &key, &value))
 			continue;
 
-		g_hash_table_replace(settings, key, value);
+		bp_hashtab_put(settings, key, value);
 	}
 
 	rc = ferror(cfg) == 0;
@@ -1103,7 +1144,7 @@ static bool do_setting(const char *arg)
 	if (!parse_kvstr(arg, &key, &value))
 		return false;
 
-	g_hash_table_replace(settings, key, value);
+	bp_hashtab_put(settings, key, value);
 
 	/*
 	 * trigger special setting-specific behaviors
@@ -1191,6 +1232,54 @@ static void init_blkdb(void)
 	}
 }
 
+static const char *genesis_bitcoin =
+"0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
+static const char *genesis_testnet =
+"0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae180101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
+
+static void init_block0(void)
+{
+	const char *genesis_hex = NULL;
+
+	switch (chain->chain_id) {
+	case CHAIN_BITCOIN:
+		genesis_hex = genesis_bitcoin;
+		break;
+	case CHAIN_TESTNET3:
+		genesis_hex = genesis_testnet;
+		break;
+	default:
+		fprintf(plog, "unsupported chain.  add genesis block here!\n");
+		exit(1);
+		break;
+	}
+
+	size_t olen = 0;
+	size_t genesis_rawlen = strlen(genesis_hex) / 2;
+	char genesis_raw[genesis_rawlen];
+	if (!decode_hex(genesis_raw, sizeof(genesis_raw), genesis_hex, &olen)) {
+		fprintf(plog, "chain hex decode fail\n");
+		exit(1);
+	}
+
+	cstring *msg0 = message_str(chain->netmagic, "block",
+				    genesis_raw, genesis_rawlen);
+	ssize_t bwritten = write(blocks_fd, msg0->str, msg0->len);
+	if (bwritten != msg0->len) {
+		fprintf(plog, "blocks write0 failed: %s\n", strerror(errno));
+		exit(1);
+	}
+	cstr_free(msg0, true);
+
+	off64_t fpos64 = lseek64(blocks_fd, 0, SEEK_SET);
+	if (fpos64 == (off64_t)-1) {
+		fprintf(plog, "blocks lseek0 failed: %s\n", strerror(errno));
+		exit(1);
+	}
+
+	fprintf(plog, "blocks: genesis block written\n");
+}
+
 static void init_blocks(void)
 {
 	char *blocks_fn = setting("blocks");
@@ -1202,6 +1291,15 @@ static void init_blocks(void)
 		fprintf(plog, "blocks file open failed: %s\n", strerror(errno));
 		exit(1);
 	}
+
+	off64_t flen = lseek64(blocks_fd, 0, SEEK_END);
+	if (flen == (off64_t)-1) {
+		fprintf(plog, "blocks file lseek64 failed: %s\n", strerror(errno));
+		exit(1);
+	}
+
+	if (flen == 0)
+		init_block0();
 }
 
 static bool spend_tx(struct bp_utxo_set *uset, const struct bp_tx *tx,
@@ -1221,7 +1319,7 @@ static bool spend_tx(struct bp_utxo_set *uset, const struct bp_tx *tx,
 			struct bp_txin *txin;
 			struct bp_txout *txout;
 
-			txin = g_ptr_array_index(tx->vin, i);
+			txin = parr_idx(tx->vin, i);
 
 			coin = bp_utxo_lookup(uset, &txin->prevout.hash);
 			if (!coin || !coin->vout)
@@ -1234,7 +1332,7 @@ static bool spend_tx(struct bp_utxo_set *uset, const struct bp_tx *tx,
 			txout = NULL;
 			if (txin->prevout.n >= coin->vout->len)
 				return false;
-			txout = g_ptr_array_index(coin->vout, txin->prevout.n);
+			txout = parr_idx(coin->vout, txin->prevout.n);
 			total_in += txout->nValue;
 
 			if (script_verf &&
@@ -1250,7 +1348,7 @@ static bool spend_tx(struct bp_utxo_set *uset, const struct bp_tx *tx,
 	for (i = 0; i < tx->vout->len; i++) {
 		struct bp_txout *txout;
 
-		txout = g_ptr_array_index(tx->vout, i);
+		txout = parr_idx(tx->vout, i);
 		total_out += txout->nValue;
 	}
 
@@ -1280,7 +1378,7 @@ static bool spend_block(struct bp_utxo_set *uset, const struct bp_block *block,
 	for (i = 0; i < block->vtx->len; i++) {
 		struct bp_tx *tx;
 
-		tx = g_ptr_array_index(block->vtx, i);
+		tx = parr_idx(block->vtx, i);
 		if (!spend_tx(uset, tx, i, height)) {
 			char hexstr[BU256_STRSZ];
 			bu256_hex(hexstr, &tx->sha256);
@@ -1413,8 +1511,36 @@ static void readprep_blocks_file(void)
 
 static void init_orphans(void)
 {
-	orphans = g_hash_table_new_full(g_bu256_hash, g_bu256_equal,
-					NULL, g_bp_block_free);
+	orphans = bp_hashtab_new_ext(bu256_hash, bu256_equal_,
+				     (bp_freefunc) bu256_free, (bp_freefunc) buffer_free);
+}
+
+static bool have_orphan(const bu256_t *v)
+{
+	return bp_hashtab_get(orphans, v);
+}
+
+static bool add_orphan(const bu256_t *hash_in, struct const_buffer *buf_in)
+{
+	if (have_orphan(hash_in))
+		return false;
+
+	bu256_t *hash = bu256_new(hash_in);
+	if (!hash) {
+		fprintf(plog, "OOM\n");
+		return false;
+	}
+
+	struct buffer *buf = buffer_copy(buf_in->p, buf_in->len);
+	if (!buf) {
+		bu256_free(hash);
+		fprintf(plog, "OOM\n");
+		return false;
+	}
+
+	bp_hashtab_put(orphans, hash, buf);
+	
+	return true;
 }
 
 static void init_peers(struct net_child_info *nci)
@@ -1442,9 +1568,9 @@ static void init_peers(struct net_child_info *nci)
 	peerman_sort(peers);
 
 	if (debugging)
-		fprintf(plog, "net: have %u/%u peers\n",
-			g_hash_table_size(peers->map_addr),
-			g_list_length(peers->addrlist));
+		fprintf(plog, "net: have %u/%zu peers\n",
+			bp_hashtab_size(peers->map_addr),
+			clist_length(peers->addrlist));
 
 	nci->peers = peers;
 }
@@ -1455,7 +1581,7 @@ static void init_nci(struct net_child_info *nci)
 	nci->read_fd = -1;
 	nci->write_fd = -1;
 	init_peers(nci);
-	nci->conns = g_ptr_array_sized_new(NC_MAX_CONN);
+	nci->conns = parr_new(NC_MAX_CONN, NULL);
 	nci->eb = event_base_new();
 }
 
@@ -1484,17 +1610,17 @@ static void shutdown_nci(struct net_child_info *nci)
 	peerman_free(nci->peers);
 	nc_conns_gc(nci, true);
 	assert(nci->conns->len == 0);
-	g_ptr_array_free(nci->conns, TRUE);
+	parr_free(nci->conns, true);
 	event_base_free(nci->eb);
 }
 
 static void shutdown_daemon(struct net_child_info *nci)
 {
 	bool rc = peerman_write(nci->peers);
-	fprintf(plog, "net: %s %u/%u peers\n",
+	fprintf(plog, "net: %s %u/%zu peers\n",
 		rc ? "wrote" : "failed to write",
-		g_hash_table_size(nci->peers->map_addr),
-		g_list_length(nci->peers->addrlist));
+		bp_hashtab_size(nci->peers->map_addr),
+		clist_length(nci->peers->addrlist));
 
 	if (plog != stdout && plog != stderr) {
 		fclose(plog);
@@ -1503,8 +1629,8 @@ static void shutdown_daemon(struct net_child_info *nci)
 
 	if (setting("free")) {
 		shutdown_nci(nci);
-		g_hash_table_unref(orphans);
-		g_hash_table_unref(settings);
+		bp_hashtab_unref(orphans);
+		bp_hashtab_unref(settings);
 		blkdb_free(&db);
 		bp_utxo_set_free(&uset);
 	}
@@ -1518,8 +1644,8 @@ static void term_signal(int signo)
 
 int main (int argc, char *argv[])
 {
-	settings = g_hash_table_new_full(g_str_hash, g_str_equal,
-					 g_free, g_free);
+	settings = bp_hashtab_new_ext(czstr_hash, czstr_equal,
+				      free, free);
 
 	if (!preload_settings())
 		return 1;

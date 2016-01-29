@@ -12,6 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <time.h>
 #include <openssl/sha.h>
 #include <openssl/ripemd.h>
 #include <ccoin/coredefs.h>
@@ -153,17 +154,38 @@ unsigned long djb2_hash(unsigned long hash, const void *_buf, size_t buflen)
 	return hash;
 }
 
-void g_list_shuffle(GList *l)
+static void init_rng(void)
 {
-	unsigned int len = g_list_length(l);
+	static bool done = false;
+
+	if (done)
+		return;
+
+	srand(time(NULL));
+
+	done = true;
+}
+
+static int random_int_range(int begin, int end)
+{
+	init_rng();
+
+	int l = end - begin + 1;
+	int r = rand() % l;
+	return begin + r;
+}
+
+void clist_shuffle(clist *l)
+{
+	unsigned int len = clist_length(l);
 	unsigned int idx = 0;
 
-	GList *tmp = l;
+	clist *tmp = l;
 	while (tmp) {
-		unsigned int ridx = g_random_int_range(0, len - 1);
+		unsigned int ridx = random_int_range(0, len - 1);
 
 		if (ridx != idx) {
-			GList *swap = g_list_nth(l, ridx);
+			clist *swap = clist_nth(l, ridx);
 
 			void *tmp_data = tmp->data;
 			void *swap_data = swap->data;
@@ -183,7 +205,7 @@ void btc_decimal(char *valstr, size_t valstr_sz, int64_t val)
 	int64_t q = val_abs / COIN;
 	int64_t r = val_abs % COIN;
 
-	snprintf(valstr, valstr_sz, "%lld.%lld",
+	snprintf(valstr, valstr_sz, "%lld.%08lld",
 		 (long long) q,
 		 (long long) r);
 	valstr[valstr_sz - 1] = 0;
@@ -195,5 +217,21 @@ void btc_decimal(char *valstr, size_t valstr_sz, int64_t val)
 		valstr[strlen(valstr)] = '0';
 		valstr[valstr_sz - 1] = 0;	/* for rare edge case */
 	}
+}
+
+unsigned long czstr_hash(const void *p)
+{
+	size_t slen = strlen(p ? p : "");
+	return djb2_hash(0x8088, p, slen);
+}
+
+bool czstr_equal(const void *a, const void *b)
+{
+	size_t a_len = strlen(a ? a : "");
+	size_t b_len = strlen(b ? b : "");
+	if (a_len != b_len)
+		return false;
+
+	return (memcmp(a, b, a_len) == 0);
 }
 

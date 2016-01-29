@@ -10,7 +10,6 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
-#include <glib.h>
 #include <ccoin/util.h>
 #include <ccoin/script.h>
 #include <ccoin/core.h>
@@ -26,7 +25,7 @@ static void test_txout(const struct bp_txout *txout)
 
 	struct bscript_parser bsp;
 	struct bscript_op op;
-	GList *ops = NULL;
+	clist *ops = NULL;
 
 	/*
 	 * parse script
@@ -37,8 +36,8 @@ static void test_txout(const struct bp_txout *txout)
 	while (bsp_getop(&op, &bsp)) {
 		struct bscript_op *op_p;
 
-		op_p = g_memdup(&op, sizeof(op));
-		ops = g_list_append(ops, op_p);
+		op_p = memdup(&op, sizeof(op));
+		ops = clist_append(ops, op_p);
 	}
 
 	assert(!bsp.error);
@@ -47,8 +46,8 @@ static void test_txout(const struct bp_txout *txout)
 	 * build script
 	 */
 
-	GList *tmp = ops;
-	GString *s = g_string_sized_new(256);
+	clist *tmp = ops;
+	cstring *s = cstr_new_sz(256);
 	while (tmp) {
 		struct bscript_op *op_p;
 
@@ -62,12 +61,12 @@ static void test_txout(const struct bp_txout *txout)
 		}
 	}
 
-	g_list_free_full(ops, g_free);
+	clist_free_ext(ops, free);
 
 	/* byte-compare original and newly created scripts */
-	assert(g_string_equal(s, txout->scriptPubKey));
+	assert(cstr_equal(s, txout->scriptPubKey));
 
-	g_string_free(s, TRUE);
+	cstr_free(s, true);
 }
 
 static void runtest(const char *ser_fn_base)
@@ -98,12 +97,12 @@ static void runtest(const char *ser_fn_base)
 
 	unsigned int n_tx, n_out;
 	for (n_tx = 0; n_tx < block.vtx->len; n_tx++) {
-		struct bp_tx *tx = g_ptr_array_index(block.vtx, n_tx);
+		struct bp_tx *tx = parr_idx(block.vtx, n_tx);
 
 		for (n_out = 0; n_out < tx->vout->len; n_out++) {
 			struct bp_txout *txout;
 
-			txout = g_ptr_array_index(tx->vout, n_out);
+			txout = parr_idx(tx->vout, n_out);
 			test_txout(txout);
 		}
 	}

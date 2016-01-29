@@ -6,39 +6,34 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <glib.h>
 #include <ccoin/util.h>
 #include <ccoin/buffer.h>
 
-guint g_buffer_hash(gconstpointer key_)
+unsigned long buffer_hash(const void *key_)
 {
 	const struct buffer *buf = key_;
 
 	return djb2_hash(0x1721, buf->p, buf->len);
 }
 
-gboolean g_buffer_equal(gconstpointer a_, gconstpointer b_)
+bool buffer_equal(const void *a_, const void *b_)
 {
 	const struct buffer *a = a_;
 	const struct buffer *b = b_;
 
 	if (a->len != b->len)
-		return FALSE;
+		return false;
 	return memcmp(a->p, b->p, a->len) == 0;
 }
 
-void buffer_free(struct buffer *buf)
+void buffer_free(void *struct_buffer)
 {
+	struct buffer *buf = struct_buffer;
 	if (!buf)
 		return;
 
 	free(buf->p);
 	free(buf);
-}
-
-void g_buffer_free(gpointer data)
-{
-	buffer_free(data);
 }
 
 struct buffer *buffer_copy(const void *data, size_t data_len)

@@ -18,7 +18,7 @@ static void bp_utxo_free_vout(struct bp_utxo *coin)
 	if (!coin || !coin->vout)
 		return;
 
-	g_ptr_array_free(coin->vout, TRUE);
+	parr_free(coin->vout, true);
 	coin->vout = NULL;
 }
 
@@ -41,22 +41,22 @@ bool bp_utxo_from_tx(struct bp_utxo *coin, const struct bp_tx *tx,
 	coin->height = height;
 	coin->version = tx->nVersion;
 
-	coin->vout = g_ptr_array_new_full(tx->vout->len, g_bp_txout_free);
+	coin->vout = parr_new(tx->vout->len, bp_txout_free_cb);
 	unsigned int i;
 
 	for (i = 0; i < tx->vout->len; i++) {
 		struct bp_txout *old_out, *new_out;
 
-		old_out = g_ptr_array_index(tx->vout, i);
+		old_out = parr_idx(tx->vout, i);
 		new_out = malloc(sizeof(*new_out));
 		bp_txout_copy(new_out, old_out);
-		g_ptr_array_add(coin->vout, new_out);
+		parr_add(coin->vout, new_out);
 	}
 
 	return true;
 }
 
-void utxo_free_ent(gpointer data_)
+static void utxo_free_ent(void *data_)
 {
 	struct bp_utxo *coin = data_;
 	if (!coin)
@@ -70,8 +70,8 @@ void bp_utxo_set_init(struct bp_utxo_set *uset)
 {
 	memset(uset, 0, sizeof(*uset));
 
-	uset->map = g_hash_table_new_full(g_bu256_hash, g_bu256_equal,
-					  NULL, utxo_free_ent);
+	uset->map = bp_hashtab_new_ext(bu256_hash, bu256_equal_,
+				       NULL, utxo_free_ent);
 }
 
 void bp_utxo_set_free(struct bp_utxo_set *uset)
@@ -80,7 +80,7 @@ void bp_utxo_set_free(struct bp_utxo_set *uset)
 		return;
 
 	if (uset->map) {
-		g_hash_table_unref(uset->map);
+		bp_hashtab_unref(uset->map);
 		uset->map = NULL;
 	}
 }
@@ -92,7 +92,7 @@ bool bp_utxo_is_spent(struct bp_utxo_set *uset, const struct bp_outpt *outpt)
 	    (outpt->n >= coin->vout->len))
 		return true;
 
-	struct bp_txout *txout = g_ptr_array_index(coin->vout, outpt->n);
+	struct bp_txout *txout = parr_idx(coin->vout, outpt->n);
 	if (!txout)
 		return true;
 
@@ -108,7 +108,7 @@ static bool bp_utxo_null(const struct bp_utxo *coin)
 	for (i = 0; i < coin->vout->len; i++) {
 		struct bp_txout *txout;
 
-		txout = g_ptr_array_index(coin->vout, i);
+		txout = parr_idx(coin->vout, i);
 		if (txout)
 			return false;
 	}
@@ -124,18 +124,18 @@ bool bp_utxo_spend(struct bp_utxo_set *uset, const struct bp_outpt *outpt)
 		return false;
 
 	/* find txout, given index */
-	struct bp_txout *txout = g_ptr_array_index(coin->vout, outpt->n);
+	struct bp_txout *txout = parr_idx(coin->vout, outpt->n);
 	if (!txout)
 		return false;
 
 	/* free txout, replace with NULL marker indicating spent-ness */
-	coin->vout->pdata[outpt->n] = NULL;
+	coin->vout->data[outpt->n] = NULL;
 	bp_txout_free(txout);
 	free(txout);
 
 	/* if coin entirely spent, free it */
 	if (bp_utxo_null(coin))
-		g_hash_table_remove(uset->map, &coin->hash);
+		bp_hashtab_del(uset->map, &coin->hash);
 
 	return true;
 }

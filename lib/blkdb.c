@@ -11,13 +11,13 @@
 #include <unistd.h>
 #include <string.h>
 #include <openssl/bn.h>
-#include <glib.h>
 #include <ccoin/blkdb.h>
 #include <ccoin/message.h>
 #include <ccoin/serialize.h>
 #include <ccoin/buint.h>
 #include <ccoin/mbr.h>
 #include <ccoin/util.h>
+#include <ccoin/cstr.h>
 #include <ccoin/compat.h>		/* for fdatasync */
 
 struct blkinfo *bi_new(void)
@@ -58,8 +58,8 @@ bool blkdb_init(struct blkdb *db, const unsigned char *netmagic,
 	bu256_copy(&db->block0, genesis_block);
 
 	memcpy(db->netmagic, netmagic, sizeof(db->netmagic));
-	db->blocks = g_hash_table_new_full(g_bu256_hash, g_bu256_equal,
-					   NULL, (GDestroyNotify) bi_free);
+	db->blocks = bp_hashtab_new_ext(bu256_hash, bu256_equal_,
+					NULL, (bp_freefunc) bi_free);
 
 	return true;
 }
@@ -81,7 +81,7 @@ static bool blkdb_connect(struct blkdb *db, struct blkinfo *bi,
 	bool best_chain = false;
 
 	/* verify genesis block matches first record */
-	if (g_hash_table_size(db->blocks) == 0) {
+	if (bp_hashtab_size(db->blocks) == 0) {
 		if (!bu256_equal(&bi->hdr.sha256, &db->block0))
 			goto out;
 
@@ -110,7 +110,7 @@ static bool blkdb_connect(struct blkdb *db, struct blkinfo *bi,
 	}
 
 	/* add to block map */
-	g_hash_table_insert(db->blocks, &bi->hash, bi);
+	bp_hashtab_put(db->blocks, &bi->hash, bi);
 
 	/* if new best chain found, update pointers */
 	if (best_chain) {
@@ -197,9 +197,9 @@ err_out:
 	return false;
 }
 
-static GString *ser_blkinfo(const struct blkinfo *bi)
+static cstring *ser_blkinfo(const struct blkinfo *bi)
 {
-	GString *rs = g_string_sized_new(sizeof(*bi));
+	cstring *rs = cstr_new_sz(sizeof(*bi));
 
 	ser_u256(rs, &bi->hash);
 	ser_bp_block(rs, &bi->hdr);
@@ -207,13 +207,13 @@ static GString *ser_blkinfo(const struct blkinfo *bi)
 	return rs;
 }
 
-static GString *blkdb_ser_rec(struct blkdb *db, const struct blkinfo *bi)
+static cstring *blkdb_ser_rec(struct blkdb *db, const struct blkinfo *bi)
 {
-	GString *data = ser_blkinfo(bi);
+	cstring *data = ser_blkinfo(bi);
 
-	GString *rs = message_str(db->netmagic, "rec", data->str, data->len);
+	cstring *rs = message_str(db->netmagic, "rec", data->str, data->len);
 
-	g_string_free(data, TRUE);
+	cstr_free(data, true);
 
 	return rs;
 }
@@ -246,7 +246,7 @@ bool blkdb_add(struct blkdb *db, struct blkinfo *bi,
 	       struct blkdb_reorg *reorg_info)
 {
 	if (db->fd >= 0) {
-		GString *data = blkdb_ser_rec(db, bi);
+		cstring *data = blkdb_ser_rec(db, bi);
 		if (!data)
 			return false;
 
@@ -254,7 +254,7 @@ bool blkdb_add(struct blkdb *db, struct blkinfo *bi,
 		size_t data_len = data->len;
 		ssize_t wrc = write(db->fd, data->str, data_len);
 
-		g_string_free(data, TRUE);
+		cstr_free(data, true);
 
 		if (wrc != data_len)
 			return false;
@@ -272,7 +272,7 @@ void blkdb_free(struct blkdb *db)
 	if (db->close_fd && (db->fd >= 0))
 		close(db->fd);
 
-	g_hash_table_unref(db->blocks);
+	bp_hashtab_unref(db->blocks);
 }
 
 void blkdb_locator(struct blkdb *db, struct blkinfo *bi,

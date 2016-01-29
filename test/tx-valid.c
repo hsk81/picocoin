@@ -7,26 +7,27 @@
 #include <ccoin/hexcode.h>
 #include <ccoin/buint.h>
 #include <ccoin/script.h>
-#include <ccoin/compat.h>		/* for g_ptr_array_new_full */
+#include <ccoin/hashtab.h>
+#include <ccoin/compat.h>		/* for parr_new */
 #include "libtest.h"
 
-GPtrArray *comments = NULL;
+parr *comments = NULL;
 
-static guint input_hash(gconstpointer key_)
+static unsigned long input_hash(const void *key_)
 {
 	const struct bp_outpt *key = key_;
 
-	return (guint) key->hash.dword[4];
+	return key->hash.dword[4];
 }
 
-static gboolean input_equal(gconstpointer a, gconstpointer b)
+static bool input_equal(const void *a, const void *b)
 {
 	return bp_outpt_equal(a, b);
 }
 
-static void input_value_free(gpointer v)
+static void input_value_free(void *v)
 {
-	g_string_free(v, TRUE);
+	cstr_free(v, true);
 }
 
 static void dump_comments(void)
@@ -34,12 +35,12 @@ static void dump_comments(void)
 	unsigned int i;
 	for (i = 0; i < comments->len; i++) {
 		fprintf(stderr, "tx-valid cmt: %s\n",
-			(char *)g_ptr_array_index(comments, i));
+			(char *)parr_idx(comments, i));
 	}
 }
 
-static void test_tx_valid(bool is_valid, GHashTable *input_map,
-			  GString *tx_ser, bool enforce_p2sh)
+static void test_tx_valid(bool is_valid, struct bp_hashtab *input_map,
+			  cstring *tx_ser, bool enforce_p2sh)
 {
 	struct bp_tx tx;
 
@@ -67,11 +68,11 @@ static void test_tx_valid(bool is_valid, GHashTable *input_map,
 	for (i = 0; i < tx.vin->len; i++) {
 		struct bp_txin *txin;
 
-		txin = g_ptr_array_index(tx.vin, i);
+		txin = parr_idx(tx.vin, i);
 		assert(txin != NULL);
 
-		GString *scriptPubKey = g_hash_table_lookup(input_map,
-							    &txin->prevout);
+		cstring *scriptPubKey = bp_hashtab_get(input_map,
+						       &txin->prevout);
 		if (scriptPubKey == NULL) {
 			if (!is_valid) {
 				/* if testing tx_invalid.json, missing input
@@ -119,11 +120,11 @@ static void runtest(bool is_valid, const char *basefn)
 	json_t *tests = read_json(fn);
 	assert(json_is_array(tests));
 
-	GHashTable *input_map = g_hash_table_new_full(
+	struct bp_hashtab *input_map = bp_hashtab_new_ext(
 		input_hash, input_equal,
-		g_free, input_value_free);
+		free, input_value_free);
 
-	comments = g_ptr_array_new_full(8, g_free);
+	comments = parr_new(8, free);
 
 	unsigned int idx;
 	for (idx = 0; idx < json_array_size(tests); idx++) {
@@ -133,7 +134,7 @@ static void runtest(bool is_valid, const char *basefn)
 			const char *cmt =
 				json_string_value(json_array_get(test, 0));
 			if (cmt)
-				g_ptr_array_add(comments, strdup(cmt));
+				parr_add(comments, strdup(cmt));
 			continue;			/* comments */
 		}
 
@@ -145,7 +146,7 @@ static void runtest(bool is_valid, const char *basefn)
 		json_t *inputs = json_array_get(test, 0);
 		assert(json_is_array(inputs));
 
-		g_hash_table_remove_all(input_map);
+		bp_hashtab_clear(input_map);
 
 		unsigned int i;
 		for (i = 0; i < json_array_size(inputs); i++) {
@@ -168,10 +169,10 @@ static void runtest(bool is_valid, const char *basefn)
 			hex_bu256(&outpt->hash, prev_hashstr);
 			outpt->n = prev_n;
 
-			GString *script = parse_script_str(prev_pubkey_enc);
+			cstring *script = parse_script_str(prev_pubkey_enc);
 			assert(script != NULL);
 
-			g_hash_table_insert(input_map, outpt, script);
+			bp_hashtab_put(input_map, outpt, script);
 		}
 
 		const char *tx_hexser =
@@ -180,23 +181,23 @@ static void runtest(bool is_valid, const char *basefn)
 
 		bool enforce_p2sh = json_is_true(json_array_get(test, 2));
 
-		GString *tx_ser = hex2str(tx_hexser);
+		cstring *tx_ser = hex2str(tx_hexser);
 		assert(tx_ser != NULL);
 
 		test_tx_valid(is_valid, input_map, tx_ser, enforce_p2sh);
 
-		g_string_free(tx_ser, TRUE);
+		cstr_free(tx_ser, true);
 
 		if (comments->len > 0) {
-			g_ptr_array_free(comments, TRUE);
-			comments = g_ptr_array_new_full(8, g_free);
+			parr_free(comments, true);
+			comments = parr_new(8, free);
 		}
 	}
 
-	g_ptr_array_free(comments, TRUE);
+	parr_free(comments, true);
 	comments = NULL;
 
-	g_hash_table_unref(input_map);
+	bp_hashtab_unref(input_map);
 	json_decref(tests);
 	free(fn);
 }

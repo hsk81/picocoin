@@ -6,9 +6,13 @@
  */
 
 #include <stdbool.h>
-#include <glib.h>
 #include <ccoin/core.h>
 #include <ccoin/buint.h>
+#include <ccoin/hashtab.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct blkinfo;
 
@@ -39,7 +43,7 @@ struct blkdb {
 	unsigned char	netmagic[4];
 	bu256_t		block0;
 
-	GHashTable	*blocks;
+	struct bp_hashtab *blocks;
 
 	struct blkinfo	*best_chain;
 };
@@ -58,7 +62,11 @@ extern void blkdb_locator(struct blkdb *db, struct blkinfo *bi,
 
 static inline struct blkinfo *blkdb_lookup(struct blkdb *db,const bu256_t *hash)
 {
-	return g_hash_table_lookup(db->blocks, hash);
+	return (struct blkinfo *)bp_hashtab_get(db->blocks, hash);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __LIBCCOIN_BLKDB_H__ */

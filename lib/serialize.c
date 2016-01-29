@@ -6,37 +6,42 @@
 
 #include <stdint.h>
 #include <string.h>
-#include <glib.h>
 #include <openssl/sha.h>
 #include <openssl/bn.h>
 #include <ccoin/serialize.h>
 #include <ccoin/util.h>
 #include <ccoin/compat.h>
+#include <ccoin/endian.h>
 
-void ser_bytes(GString *s, const void *p, size_t len)
+void ser_bytes(cstring *s, const void *p, size_t len)
 {
-	g_string_append_len(s, p, len);
+	cstr_append_buf(s, p, len);
 }
 
-void ser_u16(GString *s, uint16_t v_)
+void ser_u16(cstring *s, uint16_t v_)
 {
-	uint16_t v = GUINT16_TO_LE(v_);
-	g_string_append_len(s, (gchar *) &v, sizeof(v));
+	uint16_t v = htole16(v_);
+	cstr_append_buf(s, &v, sizeof(v));
 }
 
-void ser_u32(GString *s, uint32_t v_)
+void ser_u32(cstring *s, uint32_t v_)
 {
-	uint32_t v = GUINT32_TO_LE(v_);
-	g_string_append_len(s, (gchar *) &v, sizeof(v));
+	uint32_t v = htole32(v_);
+	cstr_append_buf(s, &v, sizeof(v));
 }
 
-void ser_u64(GString *s, uint64_t v_)
+void ser_u64(cstring *s, uint64_t v_)
 {
-	uint64_t v = GUINT64_TO_LE(v_);
-	g_string_append_len(s, (gchar *) &v, sizeof(v));
+	uint64_t v = htole64(v_);
+	cstr_append_buf(s, &v, sizeof(v));
 }
 
-void ser_varlen(GString *s, uint32_t vlen)
+void ser_bool(cstring *s, bool v_)
+{
+	cstr_append_c(s, v_?1:0);
+}
+
+void ser_varlen(cstring *s, uint32_t vlen)
 {
 	unsigned char c;
 
@@ -60,7 +65,7 @@ void ser_varlen(GString *s, uint32_t vlen)
 	/* u64 case intentionally not implemented */
 }
 
-void ser_str(GString *s, const char *s_in, size_t maxlen)
+void ser_str(cstring *s, const char *s_in, size_t maxlen)
 {
 	size_t slen = strnlen(s_in, maxlen);
 
@@ -68,7 +73,7 @@ void ser_str(GString *s, const char *s_in, size_t maxlen)
 	ser_bytes(s, s_in, slen);
 }
 
-void ser_varstr(GString *s, GString *s_in)
+void ser_varstr(cstring *s, cstring *s_in)
 {
 	if (!s_in || !s_in->len) {
 		ser_varlen(s, 0);
@@ -79,7 +84,7 @@ void ser_varstr(GString *s, GString *s_in)
 	ser_bytes(s, s_in->str, s_in->len);
 }
 
-void ser_u256_array(GString *s, GPtrArray *arr)
+void ser_u256_array(cstring *s, parr *arr)
 {
 	unsigned int arr_len = arr ? arr->len : 0;
 
@@ -89,7 +94,7 @@ void ser_u256_array(GString *s, GPtrArray *arr)
 	for (i = 0; i < arr_len; i++) {
 		bu256_t *av;
 
-		av = g_ptr_array_index(arr, i);
+		av = parr_idx(arr, i);
 		ser_u256(s, av);
 	}
 }
@@ -124,7 +129,7 @@ bool deser_u16(uint16_t *vo, struct const_buffer *buf)
 	if (!deser_bytes(&v, buf, sizeof(v)))
 		return false;
 
-	*vo = GUINT16_FROM_LE(v);
+	*vo = le16toh(v);
 	return true;
 }
 
@@ -135,7 +140,7 @@ bool deser_u32(uint32_t *vo, struct const_buffer *buf)
 	if (!deser_bytes(&v, buf, sizeof(v)))
 		return false;
 
-	*vo = GUINT32_FROM_LE(v);
+	*vo = le32toh(v);
 	return true;
 }
 
@@ -146,7 +151,18 @@ bool deser_u64(uint64_t *vo, struct const_buffer *buf)
 	if (!deser_bytes(&v, buf, sizeof(v)))
 		return false;
 
-	*vo = GUINT64_FROM_LE(v);
+	*vo = le64toh(v);
+	return true;
+}
+
+bool deser_bool(bool *vo, struct const_buffer *buf)
+{
+	uint8_t v;
+
+	if (!deser_bytes(&v, buf, sizeof(v)))
+		return false;
+
+	*vo = (0 != v);
 	return true;
 }
 
@@ -203,10 +219,10 @@ bool deser_str(char *so, struct const_buffer *buf, size_t maxlen)
 	return true;
 }
 
-bool deser_varstr(GString **so, struct const_buffer *buf)
+bool deser_varstr(cstring **so, struct const_buffer *buf)
 {
 	if (*so) {
-		g_string_free(*so, TRUE);
+		cstr_free(*so, true);
 		*so = NULL;
 	}
 
@@ -216,8 +232,8 @@ bool deser_varstr(GString **so, struct const_buffer *buf)
 	if (buf->len < len)
 		return false;
 
-	GString *s = g_string_sized_new(len);
-	g_string_append_len(s, buf->p, len);
+	cstring *s = cstr_new_sz(len);
+	cstr_append_buf(s, buf->p, len);
 
 	buf->p += len;
 	buf->len -= len;
@@ -227,11 +243,11 @@ bool deser_varstr(GString **so, struct const_buffer *buf)
 	return true;
 }
 
-bool deser_u256_array(GPtrArray **ao, struct const_buffer *buf)
+bool deser_u256_array(parr **ao, struct const_buffer *buf)
 {
-	GPtrArray *arr = *ao;
+	parr *arr = *ao;
 	if (arr) {
-		g_ptr_array_free(arr, TRUE);
+		parr_free(arr, true);
 		*ao = arr = NULL;
 	}
 
@@ -241,7 +257,7 @@ bool deser_u256_array(GPtrArray **ao, struct const_buffer *buf)
 	if (!vlen)
 		return true;
 
-	arr = g_ptr_array_new_full(vlen, g_bu256_free);
+	arr = parr_new(vlen, bu256_free);
 	if (!arr)
 		return false;
 
@@ -255,14 +271,14 @@ bool deser_u256_array(GPtrArray **ao, struct const_buffer *buf)
 			goto err_out;
 		}
 
-		g_ptr_array_add(arr, n);
+		parr_add(arr, n);
 	}
 
 	*ao = arr;
 	return true;
 
 err_out:
-	g_ptr_array_free(arr, TRUE);
+	parr_free(arr, true);
 	return false;
 }
 

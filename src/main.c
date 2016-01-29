@@ -19,7 +19,6 @@
 #include <netdb.h>
 #endif
 #include <ctype.h>
-#include <glib.h>
 #include <openssl/bn.h>
 #include <openssl/rand.h>
 #include "picocoin.h"
@@ -27,11 +26,12 @@
 #include "wallet.h"
 #include <ccoin/core.h>
 #include <ccoin/util.h>
+#include <ccoin/hashtab.h>
 #include <ccoin/net.h>
 #include <ccoin/compat.h>		/* for strndup */
 
 const char *prog_name = "picocoin";
-GHashTable *settings;
+struct bp_hashtab *settings;
 struct wallet *cur_wallet;
 const struct chain_info *chain = NULL;
 bu256_t chain_genesis;
@@ -93,7 +93,7 @@ static bool read_config_file(const char *cfg_fn)
 		if (!parse_kvstr(line, &key, &value))
 			continue;
 
-		g_hash_table_replace(settings, key, value);
+		bp_hashtab_put(settings, key, value);
 	}
 
 	rc = ferror(cfg) == 0;
@@ -109,7 +109,7 @@ static bool do_setting(const char *arg)
 	if (!parse_kvstr(arg, &key, &value))
 		return false;
 
-	g_hash_table_replace(settings, key, value);
+	bp_hashtab_put(settings, key, value);
 
 	/*
 	 * trigger special setting-specific behaviors
@@ -145,7 +145,7 @@ struct lsi_info {
 	unsigned int	iter_count;
 };
 
-static void list_setting_iter(gpointer key_, gpointer value_, gpointer lsi_)
+static void list_setting_iter(void *key_, void *value_, void *lsi_)
 {
 	char *key = key_;
 	char *value = value_;
@@ -161,20 +161,20 @@ static void list_setting_iter(gpointer key_, gpointer value_, gpointer lsi_)
 
 static void list_settings(void)
 {
-	struct lsi_info lsi = { g_hash_table_size(settings), };
+	struct lsi_info lsi = { bp_hashtab_size(settings), };
 
 	printf("{\n");
 
-	g_hash_table_foreach(settings, list_setting_iter, &lsi);
+	bp_hashtab_iter(settings, list_setting_iter, &lsi);
 
 	printf("}\n");
 }
 
 static void list_dns_seeds(void)
 {
-	GList *tmp, *addrlist = bu_dns_seed_addrs();
+	clist *tmp, *addrlist = bu_dns_seed_addrs();
 
-	size_t list_len = g_list_length(addrlist);
+	size_t list_len = clist_length(addrlist);
 	unsigned int n_ent = 0;
 
 	printf("[\n");
@@ -196,7 +196,7 @@ static void list_dns_seeds(void)
 		n_ent++;
 	}
 
-	g_list_free_full(addrlist, g_free);
+	clist_free_ext(addrlist, free);
 
 	printf("]\n");
 }
@@ -284,10 +284,10 @@ static bool do_command(const char *s)
 		list_settings();
 
 	else if (!strcmp(s, "new-address"))
-		wallet_new_address();
+		cur_wallet_new_address();
 
 	else if (!strcmp(s, "new-wallet"))
-		wallet_create();
+		cur_wallet_create();
 
 	else if (!strcmp(s, "netsync"))
 		network_sync();
@@ -296,13 +296,13 @@ static bool do_command(const char *s)
 		printf("version=%s\n", VERSION);
 
 	else if (!strcmp(s, "wallet-addr"))
-		wallet_addresses();
+		cur_wallet_addresses();
 
 	else if (!strcmp(s, "wallet-info"))
-		wallet_info();
+		cur_wallet_info();
 
 	else if (!strcmp(s, "wallet-dump"))
-		wallet_dump();
+		cur_wallet_dump();
 
 	return true;
 }
@@ -310,8 +310,8 @@ static bool do_command(const char *s)
 int main (int argc, char *argv[])
 {
 	prog_name = argv[0];
-	settings = g_hash_table_new_full(g_str_hash, g_str_equal,
-					 g_free, g_free);
+	settings = bp_hashtab_new_ext(czstr_hash, czstr_equal,
+				      free, free);
 
 	if (!preload_settings())
 		return 1;
@@ -319,10 +319,12 @@ int main (int argc, char *argv[])
 
 	RAND_bytes((unsigned char *)&instance_nonce, sizeof(instance_nonce));
 
+	bool done_command = false;
 	unsigned int arg;
 	for (arg = 1; arg < argc; arg++) {
 		const char *argstr = argv[arg];
 		if (is_command(argstr)) {
+			done_command = true;
 			if (!do_command(argstr))
 				return 1;
 		} else {
@@ -331,6 +333,8 @@ int main (int argc, char *argv[])
 		}
 	}
 
+	if (!done_command)
+		do_command("help");
 	return 0;
 }
 

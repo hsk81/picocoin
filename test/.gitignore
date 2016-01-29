@@ -7,13 +7,22 @@ blockfile
 bloom
 blkdb
 chain-verf
+clist
+cstr
 fileio
+hashtab
 hex
 keyset
+message
+parr
 script
 script-parse
 tx
 tx-valid
 util
+wallet
 wallet-basics
+
+*.trs
+*.log
 

@@ -10,7 +10,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include <openssl/bn.h>
-#include <glib.h>
+#include <ccoin/endian.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum {
 	BU160_WORDS	= (160 / 32),
@@ -33,8 +37,7 @@ typedef struct bu256 {
 	uint32_t dword[BU256_WORDS];
 } bu256_t;
 
-extern guint g_bu160_hash(gconstpointer key_);
-extern gboolean g_bu160_equal(gconstpointer a_, gconstpointer b_);
+extern unsigned long bu160_hash(const void *key_);
 
 extern void bu256_bn(BIGNUM *vo, const bu256_t *vi);
 extern bool hex_bu256(bu256_t *vo, const char *hexstr);
@@ -44,10 +47,8 @@ extern void bu256_swap_dwords(bu256_t *v);
 extern void bu256_copy_swap(bu256_t *vo, const bu256_t *vi);
 extern void bu256_copy_swap_dwords(bu256_t *vo, const bu256_t *vi);
 extern void bu256_swap_dwords(bu256_t *v);
-extern guint g_bu256_hash(gconstpointer key_);
-extern gboolean g_bu256_equal(gconstpointer a_, gconstpointer b_);
-extern void bu256_free(bu256_t *v);
-extern void g_bu256_free(gpointer data);
+extern unsigned long bu256_hash(const void *key);
+extern void bu256_free(void *bu256_v);
 
 static inline bool bu256_is_zero(const bu256_t *v)
 {
@@ -68,8 +69,8 @@ static inline void bu256_zero(bu256_t *v)
 
 static inline void bu256_set_u64(bu256_t *vo, uint64_t vi)
 {
-	vo->dword[0] = GUINT32_TO_LE((uint32_t) vi);
-	vo->dword[1] = GUINT32_TO_LE((uint32_t) (vi >> 32));
+	vo->dword[0] = htole32((uint32_t) vi);
+	vo->dword[1] = htole32((uint32_t) (vi >> 32));
 	vo->dword[2] = 0;
 	vo->dword[3] = 0;
 	vo->dword[4] = 0;
@@ -83,6 +84,11 @@ static inline bool bu256_equal(const bu256_t *a, const bu256_t *b)
 	return memcmp(a, b, sizeof(bu256_t)) == 0;
 }
 
+static inline bool bu256_equal_(const void *a, const void *b)
+{
+	return bu256_equal((const bu256_t *)a, (const bu256_t *)b);
+}
+
 static inline void bu256_copy(bu256_t *vo, const bu256_t *vi)
 {
 	memcpy(vo, vi, sizeof(bu256_t));
@@ -93,10 +99,10 @@ static inline bu256_t *bu256_new(const bu256_t *init_val)
 	bu256_t *v;
 
 	if (init_val) {
-		v = malloc(sizeof(bu256_t));
+		v = (bu256_t *)malloc(sizeof(bu256_t));
 		bu256_copy(v, init_val);
 	} else
-		v = calloc(1, sizeof(bu256_t));
+		v = (bu256_t *)calloc(1, sizeof(bu256_t));
 
 	return v;
 }
@@ -105,5 +111,14 @@ static inline bool bu160_equal(const bu160_t *a, const bu160_t *b)
 {
 	return memcmp(a, b, sizeof(bu160_t)) == 0;
 }
+
+static inline bool bu160_equal_(const void *a, const void *b)
+{
+	return bu160_equal((bu160_t *)a, (bu160_t *)b);
+}
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __LIBCCOIN_BUINT_H__ */

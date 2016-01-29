@@ -9,23 +9,7 @@
 #include <ccoin/serialize.h>
 #include <ccoin/util.h>
 #include <ccoin/buffer.h>
-#include <ccoin/compat.h>		/* for g_ptr_array_new_full */
-
-static const unsigned char stdscr_pubkey[] = {
-	OP_PUBKEY, OP_CHECKSIG,
-};
-static const unsigned char stdscr_pubkeyhash[] = {
-	OP_DUP, OP_HASH160, OP_PUBKEYHASH, OP_EQUALVERIFY, OP_CHECKSIG,
-};
-
-static const struct {
-	enum txnouttype		txtype;
-	size_t			len;
-	const unsigned char	*script;
-} std_scripts[] = {
-	{ TX_PUBKEY, sizeof(stdscr_pubkey), stdscr_pubkey, },
-	{ TX_PUBKEYHASH, sizeof(stdscr_pubkeyhash), stdscr_pubkeyhash, },
-};
+#include <ccoin/endian.h>
 
 bool bsp_getop(struct bscript_op *op, struct bscript_parser *bp)
 {
@@ -79,24 +63,24 @@ err_out:
 	return false;
 }
 
-GPtrArray *bsp_parse_all(const void *data_, size_t data_len)
+parr *bsp_parse_all(const void *data_, size_t data_len)
 {
 	struct const_buffer buf = { data_, data_len };
 	struct bscript_parser bp;
 	struct bscript_op op;
-	GPtrArray *arr = g_ptr_array_new_full(16, g_free);
+	parr *arr = parr_new(16, free);
 
 	bsp_start(&bp, &buf);
 
 	while (bsp_getop(&op, &bp))
-		g_ptr_array_add(arr, g_memdup(&op, sizeof(op)));
+		parr_add(arr, memdup(&op, sizeof(op)));
 	if (bp.error)
 		goto err_out;
 
 	return arr;
 
 err_out:
-	g_ptr_array_free(arr, TRUE);
+	parr_free(arr, true);
 	return NULL;
 }
 
@@ -116,62 +100,90 @@ bool is_bsp_pushonly(struct const_buffer *buf)
 	return true;
 }
 
-static bool bsp_match_op(const struct bscript_op *op, unsigned char template)
+static bool is_bsp_op(const struct bscript_op *op, enum opcodetype opcode)
 {
-	switch (template) {
-
-	case OP_PUBKEY:
-		if (!is_bsp_pushdata(op->op))
-			return false;
-		if (op->data.len < 33 || op->data.len > 120)
-			return false;
-		return true;
-
-	case OP_PUBKEYHASH:
-		if (!is_bsp_pushdata(op->op))
-			return false;
-		if (op->data.len != 20)
-			return false;
-		return true;
-
-	default:
-		if (is_bsp_pushdata(op->op))
-			return false;
-
-		return (op->op == template);
-	}
+	return (op->op == opcode);
 }
 
-enum txnouttype bsp_classify(GPtrArray *ops)
+static bool is_bsp_op_smallint(const struct bscript_op *op)
 {
-	unsigned int n_scr;
+	return ((op->op == OP_0) ||
+		(op->op >= OP_1 && op->op <= OP_16));
+}
 
-	for (n_scr = 0; n_scr < ARRAY_SIZE(std_scripts); n_scr++) {
-		const unsigned char *script = std_scripts[n_scr].script;
-		size_t slen = std_scripts[n_scr].len;
+static bool is_bsp_op_pubkey(const struct bscript_op *op)
+{
+	if (!is_bsp_pushdata(op->op))
+		return false;
+	if (op->data.len < 33 || op->data.len > 120)
+		return false;
+	return true;
+}
 
-		/* easy check: varying script length */
-		if (ops->len != slen)
-			continue;
+static bool is_bsp_op_pubkeyhash(const struct bscript_op *op)
+{
+	if (!is_bsp_pushdata(op->op))
+		return false;
+	if (op->data.len != 20)
+		return false;
+	return true;
+}
 
-		/* verify each op matches template character's op */
-		unsigned int i;
-		bool match = true;
-		for (i = 0; i < slen; i++) {
-			struct bscript_op *op;
+// OP_PUBKEY, OP_CHECKSIG
+bool is_bsp_pubkey(parr *ops)
+{
+	return ((ops->len == 2) &&
+	        is_bsp_op(parr_idx(ops, 1), OP_CHECKSIG) &&
+	        is_bsp_op_pubkey(parr_idx(ops, 0)));
+}
 
-			op = g_ptr_array_index(ops, i);
+// OP_DUP, OP_HASH160, OP_PUBKEYHASH, OP_EQUALVERIFY, OP_CHECKSIG,
+bool is_bsp_pubkeyhash(parr *ops)
+{
+	return ((ops->len == 5) &&
+	        is_bsp_op(parr_idx(ops, 0), OP_DUP) &&
+	        is_bsp_op(parr_idx(ops, 1), OP_HASH160) &&
+	        is_bsp_op_pubkeyhash(parr_idx(ops, 2)) &&
+	        is_bsp_op(parr_idx(ops, 3), OP_EQUALVERIFY) &&
+	        is_bsp_op(parr_idx(ops, 4), OP_CHECKSIG));
+}
 
-			match = bsp_match_op(op, script[i]);
-			if (!match)
-				break;
-		}
+// OP_HASH160, OP_PUBKEYHASH, OP_EQUAL
+bool is_bsp_scripthash(parr *ops)
+{
+	return ((ops->len == 3) &&
+	        is_bsp_op(parr_idx(ops, 0), OP_HASH160) &&
+	        is_bsp_op_pubkeyhash(parr_idx(ops, 1)) &&
+	        is_bsp_op(parr_idx(ops, 2), OP_EQUAL));
+}
 
-		if (!match)
-			continue;
+// OP_SMALLINTEGER, OP_PUBKEYS, OP_SMALLINTEGER, OP_CHECKMULTISIG
+bool is_bsp_multisig(parr *ops)
+{
+	if ((ops->len < 3) || (ops->len > (16 + 3)) ||
+	    !is_bsp_op_smallint(parr_idx(ops, 0)) ||
+	    !is_bsp_op_smallint(parr_idx(ops, ops->len - 2)) ||
+	    !is_bsp_op(parr_idx(ops, ops->len - 1), OP_CHECKMULTISIG))
+		return false;
 
-		return std_scripts[n_scr].txtype;
-	}
+	unsigned int i;
+	for (i = 1; i < (ops->len - 2); i++)
+		if (!is_bsp_op_pubkey(parr_idx(ops, i)))
+			return false;
+
+	return true;
+}
+
+enum txnouttype bsp_classify(parr *ops)
+{
+	if (is_bsp_pubkeyhash(ops))
+		return TX_PUBKEYHASH;
+	if (is_bsp_scripthash(ops))
+		return TX_SCRIPTHASH;
+	if (is_bsp_pubkey(ops))
+		return TX_PUBKEY;
+	if (is_bsp_multisig(ops))
+		return TX_MULTISIG;
 
 	return TX_NONSTANDARD;
 }
@@ -181,7 +193,7 @@ bool bsp_addr_parse(struct bscript_addr *addr,
 {
 	memset(addr, 0, sizeof(*addr));
 
-	GPtrArray *ops = bsp_parse_all(data, data_len);
+	parr *ops = bsp_parse_all(data, data_len);
 	if (!ops)
 		return false;
 
@@ -189,16 +201,16 @@ bool bsp_addr_parse(struct bscript_addr *addr,
 	switch (txtype) {
 
 	case TX_PUBKEY: {
-		struct bscript_op *op = g_ptr_array_index(ops, 0);
+		struct bscript_op *op = parr_idx(ops, 0);
 		struct buffer *buf = buffer_copy(op->data.p, op->data.len);
-		addr->pub = g_list_append(addr->pub, buf);
+		addr->pub = clist_append(addr->pub, buf);
 		break;
 	}
 
 	case TX_PUBKEYHASH: {
-		struct bscript_op *op = g_ptr_array_index(ops, 2);
+		struct bscript_op *op = parr_idx(ops, 2);
 		struct buffer *buf = buffer_copy(op->data.p, op->data.len);
-		addr->pubhash = g_list_append(addr->pub, buf);
+		addr->pubhash = clist_append(addr->pubhash, buf);
 		break;
 	}
 
@@ -209,7 +221,7 @@ bool bsp_addr_parse(struct bscript_addr *addr,
 
 	addr->txtype = txtype;
 
-	g_ptr_array_free(ops, TRUE);
+	parr_free(ops, true);
 	return true;
 }
 
@@ -219,55 +231,55 @@ void bsp_addr_free(struct bscript_addr *addrs)
 		return;
 
 	if (addrs->pub) {
-		g_list_free_full(addrs->pub, g_buffer_free);
+		clist_free_ext(addrs->pub, buffer_free);
 		addrs->pub = NULL;
 	}
 	if (addrs->pubhash) {
-		g_list_free_full(addrs->pubhash, g_buffer_free);
+		clist_free_ext(addrs->pubhash, buffer_free);
 		addrs->pubhash = NULL;
 	}
 }
 
-void bsp_push_data(GString *s, const void *data, size_t data_len)
+void bsp_push_data(cstring *s, const void *data, size_t data_len)
 {
 	if (data_len < OP_PUSHDATA1) {
 		uint8_t c = (uint8_t) data_len;
 
-		g_string_append_len(s, (gchar *) &c, sizeof(c));
+		cstr_append_buf(s, &c, sizeof(c));
 	}
 
 	else if (data_len <= 0xff) {
 		uint8_t opcode = OP_PUSHDATA1;
 		uint8_t v8 = (uint8_t) data_len;
 
-		g_string_append_len(s, (gchar *) &opcode, sizeof(opcode));
-		g_string_append_len(s, (gchar *) &v8, sizeof(v8));
+		cstr_append_buf(s, &opcode, sizeof(opcode));
+		cstr_append_buf(s, &v8, sizeof(v8));
 	}
 
 	else if (data_len <= 0xffff) {
 		uint8_t opcode = OP_PUSHDATA2;
-		uint16_t v16_le = GUINT16_TO_LE((uint16_t) data_len);
+		uint16_t v16_le = htole16((uint16_t) data_len);
 
-		g_string_append_len(s, (gchar *) &opcode, sizeof(opcode));
-		g_string_append_len(s, (gchar *) &v16_le, sizeof(v16_le));
+		cstr_append_buf(s, &opcode, sizeof(opcode));
+		cstr_append_buf(s, &v16_le, sizeof(v16_le));
 	}
 
 	else {
 		uint8_t opcode = OP_PUSHDATA4;
-		uint32_t v32_le = GUINT32_TO_LE((uint32_t) data_len);
+		uint32_t v32_le = htole32((uint32_t) data_len);
 
-		g_string_append_len(s, (gchar *) &opcode, sizeof(opcode));
-		g_string_append_len(s, (gchar *) &v32_le, sizeof(v32_le));
+		cstr_append_buf(s, &opcode, sizeof(opcode));
+		cstr_append_buf(s, &v32_le, sizeof(v32_le));
 	}
 
-	g_string_append_len(s, data, data_len);
+	cstr_append_buf(s, data, data_len);
 }
 
-void bsp_push_int64(GString *s, int64_t n)
+void bsp_push_int64(cstring *s, int64_t n)
 {
 	if (n == -1 || (n >= 1 && n <= 16)) {
 		unsigned char c = (unsigned char) (n + (OP_1 - 1));
-		g_string_append_len(s, (gchar *) &c, 1);
+		cstr_append_buf(s, &c, 1);
 		return;
 	}
 
@@ -289,21 +301,21 @@ void bsp_push_int64(GString *s, int64_t n)
 	if (neg)
 		BN_set_negative(&bn, 1);
 
-	GString *vch = bn_getvch(&bn);
+	cstring *vch = bn_getvch(&bn);
 
 	bsp_push_data(s, vch->str, vch->len);
 
-	g_string_free(vch, TRUE);
+	cstr_free(vch, true);
 	BN_clear_free(&bn);
 	BN_clear_free(&bn_hi);
 	BN_clear_free(&bn_lo);
 }
 
-void bsp_push_uint64(GString *s, uint64_t n)
+void bsp_push_uint64(cstring *s, uint64_t n)
 {
 	if (n >= 1 && n <= 16) {
 		unsigned char c = (unsigned char) (n + (OP_1 - 1));
-		g_string_append_len(s, (gchar *) &c, 1);
+		cstr_append_buf(s, &c, 1);
 		return;
 	}
 
@@ -317,13 +329,37 @@ void bsp_push_uint64(GString *s, uint64_t n)
 	BN_set_word(&bn_lo, (n & 0xffffffffU));
 	BN_add(&bn, &bn_hi, &bn_lo);
 
-	GString *vch = bn_getvch(&bn);
+	cstring *vch = bn_getvch(&bn);
 
 	bsp_push_data(s, vch->str, vch->len);
 
-	g_string_free(vch, TRUE);
+	cstr_free(vch, true);
 	BN_clear_free(&bn);
 	BN_clear_free(&bn_hi);
 	BN_clear_free(&bn_lo);
+}
+
+cstring *bsp_make_scripthash(cstring *hash)
+{
+	cstring *script_out = cstr_new_sz(32);
+
+	bsp_push_op(script_out, OP_HASH160);
+	bsp_push_data(script_out, hash->str, hash->len);
+	bsp_push_op(script_out, OP_EQUAL);
+
+	return script_out;
+}
+
+cstring *bsp_make_pubkeyhash(cstring *hash)
+{
+	cstring *script_out = cstr_new_sz(32);
+
+	bsp_push_op(script_out, OP_DUP);
+	bsp_push_op(script_out, OP_HASH160);
+	bsp_push_data(script_out, hash->str, hash->len);
+	bsp_push_op(script_out, OP_EQUALVERIFY);
+	bsp_push_op(script_out, OP_CHECKSIG);
+
+	return script_out;
 }
 
